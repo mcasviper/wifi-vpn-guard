@@ -1,0 +1,112 @@
+#!/bin/bash
+
+# start automatic vpn connection based on SSID
+# author Marcus Aßhauer <github@asshaueronline.de>
+# version: 0.1
+
+# inspired by - automatically change configuration of Mac OS X based on location # author: Rocco Georgi <rocco@pavingways.com>
+# version: 0.4.0
+
+# original author: Onne Gorter <o.gorter@gmail.com>
+# url: http://tech.inhelsinki.nl/locationchanger/
+# version: 0.4
+
+# redirect all IO to a logfile
+exec &> ~/Library/Caches/wifi-vpn-guard/wifi-vpn-guard.log
+# read config file
+source ~/Library/Application\ Support/wifi-vpn-guard/wifi-vpn-guard.cfg
+
+# set $unsecure_wifi to default value 0 
+# this is only a trigger to see wifi connection without encryption
+unsecure_wifi=0
+
+# check if the config file is valid and has no more default values
+if [[ $vpn == DEFAULTVPNNAME || $fullvpn == DEFAULTFULLVPN || " ${trusted_ssids[@]} " =~ " DEFAULTSSID "  ]]; then
+    osascript -e "display notification \"Change Default Values before use!\" with title \"REMOVE BEFORE FLIGHT\""
+    exit 1
+fi
+
+# check if $fullvpn is set. this is needed to protect against unencrypted wifis. 
+# $vpn is allowed to be empty
+if [ -z "$fullvpn" ];then
+    osascript -e "display notification \"fullvpn not set!\" with title \"No fullvpn WARNING\""
+    exit 1
+fi
+
+# get a little breather before we get data for things to settle down
+sleep 2
+
+# get WIFI settings
+all=`/System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport -I`
+
+# extract SSID from all settings
+SSID=`echo $all| sed "s/.*SSID: \([^ ]*\) .*/\1/"`
+# log to which wifi is used
+echo `date` "New SSID found: $SSID"
+
+# detect unencrypted wifi
+# if so $vpn is set to the value of $fullvpn and $unsecure_wifi is set to 1
+if [[ $all == *"link auth: none"* ]];then
+    vpn=$fullvpn
+    unsecure_wifi=1
+fi
+
+# if $vpn is empty 
+if [ -z "$vpn" ];then
+    vpn=$fullvpn
+fi
+    # loop through the array of trusted SSIDs 
+    for element in "${trusted_ssids[@]}"; do
+        # if the SSID matches check if a configured vpn is connected, if so disconnect the vpn
+        if [[ $all == *"SSID: $element"* ]]; then
+            # first all connections are handled for Tunnelblick (OpenVPN)
+            if [[ $vpntool == "Tunnelblick" ]]; then
+    	        vpnstate=`osascript -e "tell application \"/Applications/Tunnelblick.app\"" -e "get state of first configuration where name = \"$vpn\"" -e "end tell"`
+    	        fullvpnstate=`osascript -e "tell application \"/Applications/Tunnelblick.app\"" -e "get state of first configuration where name = \"$fullvpn\"" -e "end tell"`
+    	        if [[ $vpnstate != 'EXITING' || $fullvpnstate != 'EXITING' ]]; then
+                    osascript -e "tell application \"/Applications/Tunnelblick.app\"" -e "disconnect \"$vpn\"" -e "disconnect \"$fullvpn\"" -e "end tell"
+    	            osascript -e "display notification \"Stopped VPN Connection!\" with title \"trusted WIFI Connected\""
+                fi 
+                # if anyone tries to trap you with a fake SSID which is yours and no encryption the $fullvpn is
+                # starting to protect you even the SSID has a name of a trusted SSID
+                if [[ $unsecure_wifi == 1 ]]; then
+                    osascript -e "tell application \"/Applications/Tunnelblick.app\"" -e "connect \"$vpn\"" -e "end tell"
+    	            osascript -e "display notification \"Started VPN Connection: $vpn!\" with title \"WARNING: known WIFI $SSID without encryption\""                
+                fi
+            # next manage VPN connections from Mac OS network settings like IPSec or even wireguard
+            elif [[ $vpntool == "macdefault" ]]; then
+    	        vpnstate=`scutil --nc list|grep "$vpn" |cut -f2 -d\ `
+    	        fullvpnstate=`scutil --nc list|grep "$fullvpn" |cut -f2 -d\ `
+    	        if [[ $vpnstate != '(Disconnected)' || $fullvpnstate != '(Disconnected)' ]]; then
+                    scutil --nc stop "$vpn"; scutil --nc stop "$fullvpn"
+    	            osascript -e "display notification \"Stopped VPN Connection!\" with title \"trusted WIFI Connected\""
+                fi 
+                if [[ $unsecure_wifi == 1 ]]; then
+                    scutil --nc start "$vpn"
+    	            osascript -e "display notification \"Started VPN Connection: $vpn!\" with title \"WARNING: known WIFI $SSID without encryption\""                
+                fi
+
+            fi
+            # if the SSID is found we don't need to loop all other array values
+            break
+        # start the vpn connection because we are connected to an unknown SSID
+	    else
+            # manage Tunnelblick (OpenVPN)
+            if [[ $vpntool == "Tunnelblick" ]]; then
+                osascript -e "tell application \"/Applications/Tunnelblick.app\"" -e "disconnect \”$vpn\”" -e "disconnect \"$fullvpn\"" -e "end tell" 
+	            vpnstate=`osascript -e "tell application \"/Applications/Tunnelblick.app\"" -e "get state of first configuration where name = \"$vpn\"" -e "end tell"`
+    	        if [[ $vpnstate == 'EXITING' ]]; then
+                    osascript -e "tell application \"/Applications/Tunnelblick.app\"" -e "connect \"$vpn\"" -e "end tell"
+    	            osascript -e "display notification \"Started VPN Connection: $vpn!\" with title \"untrusted WIFI Connected\""
+                fi 
+            # manage Mac OS default VPN connections
+            elif [[ $vpntool == "macdefault" ]];then
+                scutil --nc stop "$vpn"; scutil --nc stop "$fullvpn"
+	            vpnstate=`scutil --nc list|grep "$vpn" |cut -f2 -d\ `
+    	        if [[ $vpnstate == '(Disconnected)' ]]; then
+                    scutil --nc start "$vpn"
+    	            osascript -e "display notification \"Started VPN Connection: $vpn!\" with title \"untrusted WIFI Connected\""
+                fi 
+            fi
+        fi
+    done
